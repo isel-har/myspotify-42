@@ -1,6 +1,6 @@
 # from pandasql import sqldf
 # import polars as pl
-from gensim.models import Word2Vec
+import gensim.downloader as api
 import pandas as pd
 import duckdb
 # import gc
@@ -35,6 +35,11 @@ class Recommnender:
 
         self.unique_tracks_db = f"""SELECT string_split(line, '<SEP>') AS parts
                          FROM {self.unique_tracks}"""
+
+
+        
+# Download and load a small Word2Vec model
+        self.w2v_model = api.load("glove-wiki-gigaword-50")
 
 
     def triplets_tracks_db(self, columns):
@@ -157,8 +162,16 @@ class Recommnender:
 
 
 
-
-
+    def word_vec(self):
+        
+        for theme in self.themes:
+            top_n = 10
+            if theme in self.w2v_model:
+                similar_words = self.w2v_model.most_similar(theme, topn=top_n)
+                for w, score in similar_words:
+                    print(f"{w} -> {score}")
+            else:
+                print(f"{theme} not in vocabulary")
 
 
 
@@ -175,9 +188,10 @@ def main():
     try:
         recommender = Recommnender()
 
-        recommender.top_250_tracks()
-        recommender.top_100_tracks_by_genre()
-        recommender.collections()
+        recommender.word_vec()
+        # recommender.top_250_tracks()
+        # recommender.top_100_tracks_by_genre()
+        # recommender.collections()
 
     except Exception as e:
         print(f"error: {str(e)}")
