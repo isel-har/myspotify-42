@@ -30,21 +30,21 @@ class Recommnender:
         self.unique_tracks = """read_csv('data/p02_unique_tracks.txt',
                                     delim='\n',
                                     header = false,
-                                    columns={'line':'VARCHAR'})
-        )"""
+                                    columns={'line':'VARCHAR'}
+                            )"""
 
         self.unique_tracks_db = f"""SELECT string_split(line, '<SEP>') AS parts
                          FROM {self.unique_tracks}"""
 
 
         
-# Download and load a small Word2Vec model
         self.w2v_model = api.load("glove-wiki-gigaword-50")
 
-
+            # ROW_NUMBER() OVER (ORDER BY tdb.track_id) as index,
     def triplets_tracks_db(self, columns):
         return f"""
-            SELECT {columns}
+            SELECT
+            {columns}
             FROM
             {self.train_triplets_db} as sdb
             JOIN
@@ -54,7 +54,7 @@ class Recommnender:
                          parts[2]::VARCHAR AS song_id,
                          parts[3]::VARCHAR AS artist,
                          parts[4]::VARCHAR AS title
-                     FROM ({self.unique_tracks_db}
+                     FROM ({self.unique_tracks_db})
             )  AS tdb
             ON sdb.song_id=tdb.song_id
         """
@@ -62,10 +62,13 @@ class Recommnender:
 
     def top_250_tracks(self):
 
-        result = duckdb.sql(f"""{self.triplets_tracks_db("tdb.artist, tdb.title, sdb.play_count")}
-            ORDER by play_count desc
-            limit 250
+        result = duckdb.sql(f"""
+            {self.triplets_tracks_db("tdb.artist, tdb.title, SUM(sdb.play_count) as play_count")}
+            GROUP BY tdb.track_id, tdb.title, tdb.artist
+            ORDER BY play_count DESC
+            LIMIT 250
         """)
+
         print("_____________________Top-250 tracks_____________________")
         print(result)
         del result
@@ -73,39 +76,83 @@ class Recommnender:
 
     def top_100_tracks_by_genre(self):
 
-        genres = list(duckdb.query(f"select genre from {self.mds_tagtraum_db} group by genre").to_df().values.ravel())
+        genres = duckdb.query(f"""
+            select distinct genre
+            from {self.mds_tagtraum_db}
+        """).to_df()['genre'].tolist()
 
-        cte = f"""with tracks_table as ({self.triplets_tracks_db('tdb.artist, tdb.title, sdb.play_count, tdb.track_id')})"""
-        
-        query_ = f"""{cte} select tt.artist, tt.title, tt.play_count from tracks_table as tt
-                join {self.mds_tagtraum_db} as mds on tt.track_id = mds.track_id"""
-        
+        cte = f"""
+            WITH tracks_table AS (
+                SELECT 
+                    tdb.track_id,
+                    tdb.artist,
+                    tdb.title,
+                    SUM(sdb.play_count) AS play_count
+                FROM {self.train_triplets_db} AS sdb
+                JOIN (
+                    SELECT
+                        parts[1]::VARCHAR AS track_id,
+                        parts[2]::VARCHAR AS song_id,
+                        parts[3]::VARCHAR AS artist,
+                        parts[4]::VARCHAR AS title
+                    FROM ({self.unique_tracks_db})
+                ) AS tdb
+                ON sdb.song_id = tdb.song_id
+                GROUP BY tdb.track_id, tdb.artist, tdb.title
+            )
+        """
+
+        base_query = f"""
+            {cte}
+            SELECT tt.artist, tt.title, tt.play_count
+            FROM tracks_table AS tt
+            JOIN {self.mds_tagtraum_db} AS mds
+            ON tt.track_id = mds.track_id
+        """
 
         for genre in genres:
-            
-            result = duckdb.query(f"""{query_}
-                where mds.genre like '{genre}'
-                order by tt.play_count desc
-                limit 100
+
+            result = duckdb.query(f"""
+                {base_query}
+                WHERE mds.genre like '{genre}'
+                ORDER BY tt.play_count DESC
+                LIMIT 100
             """)
 
             print(f"_______________[Top 100 of {genre}]_______________")
             print(result)
 
+    def word_vec(self, theme,top_n=10):
+    
+        if theme in self.w2v_model:
+            return self.w2v_model.most_similar(theme, topn=top_n)
+        return None
 
-    def collection(self, theme, keywords, threshold=0.05):
-        
+
+    def collection(self, theme, keywords, threshold=0.05, word2vec=False):
+
         collection = {
             'track_id':[],
         }
 
-        theme_index = []
+        theme_index = set()
+
         for val in self.themes[theme]:
             try:
                 index = keywords.index(val)
-                theme_index.append(index)
+                theme_index.add(index)
+                        
             except ValueError:
                 continue
+    
+        if word2vec:
+            similar_tokens = self.word_vec(theme=theme, top_n=10)
+            for token, n in similar_tokens:
+                try:
+                    index = keywords.index(token)
+                    theme_index.add(index)
+                except ValueError:
+                    continue
 
         with open('data/mxm_dataset_train.txt', 'r') as f:
             for line in f:
@@ -116,12 +163,12 @@ class Recommnender:
                 track_id = parts[0]
 
                 theme_score  = 0
-                total_words = 0
+                total_words  = 0
 
                 for part in parts[2:]:
                     word_index, count = part.split(':')
                     word_index = int(word_index)
-                    count = int(count)
+                    count      = int(count)
 
                     total_words += count
 
@@ -133,16 +180,21 @@ class Recommnender:
                 if theme_ratio > threshold:
                     collection['track_id'].append(track_id)
 
-
         theme_db = duckdb.from_df(pd.DataFrame(data=collection))
         result = duckdb.query(f"""
-                    select tt.artist, tt.title, tt.play_count from
-                    ({self.triplets_tracks_db('tdb.artist, tdb.title, sdb.play_count, tdb.track_id')}) as tt
-                    join theme_db tm
-                    on tt.track_id=tm.track_id
-                    order by tt.play_count desc
-                    limit 50
-                """)
+            select 
+                tt.artist,
+                tt.title,
+                sum(tt.play_count) as play_count
+            from
+                ({self.triplets_tracks_db('tdb.artist, tdb.title, sdb.play_count, tdb.track_id')}) as tt
+            join theme_db tm
+                on tt.track_id = tm.track_id
+            group by 
+                tt.track_id, tt.artist, tt.title
+            order by play_count desc
+            limit 50
+        """)
         return result
 
 
@@ -157,30 +209,24 @@ class Recommnender:
             collection = self.collection(theme, keywords)
             print(collection)
             del collection
-
-
-
-
-
-    def word_vec(self):
+        
+        print("Word2vec")
         
         for theme in self.themes:
-            top_n = 10
-            if theme in self.w2v_model:
-                similar_words = self.w2v_model.most_similar(theme, topn=top_n)
-                for w, score in similar_words:
-                    print(f"{w} -> {score}")
-            else:
-                print(f"{theme} not in vocabulary")
+            print(f"_______________[Top 50 {theme}]_______________")
+            collection = self.collection(theme, keywords, word2vec=True)
+            print(collection)
+            del collection
+
+        print("Classification")
 
 
 
-    def ten_similar(self):
+    def ten_similar(self):## collaborative filtering
         return
 
     def ten_similar_track(self):
         return
-
 
 
 def main():
@@ -188,10 +234,10 @@ def main():
     try:
         recommender = Recommnender()
 
-        recommender.word_vec()
-        # recommender.top_250_tracks()
-        # recommender.top_100_tracks_by_genre()
-        # recommender.collections()
+        recommender.top_250_tracks()
+        recommender.top_100_tracks_by_genre()
+        recommender.collections()
+
 
     except Exception as e:
         print(f"error: {str(e)}")
