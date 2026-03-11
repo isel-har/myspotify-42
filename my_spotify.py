@@ -3,6 +3,9 @@
 import gensim.downloader as api
 import pandas as pd
 import duckdb
+from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import MultinomialNB
+
 # import gc
 
 class Recommnender:
@@ -129,7 +132,7 @@ class Recommnender:
         return None
 
 
-    def collection(self, theme, keywords, threshold=0.05, word2vec=False):
+    def collection(self, theme, keywords, threshold, word2vec=False):
 
         collection = {
             'track_id':[],
@@ -180,7 +183,8 @@ class Recommnender:
                 if theme_ratio > threshold:
                     collection['track_id'].append(track_id)
 
-        theme_db = duckdb.from_df(pd.DataFrame(data=collection))
+        data_frame = pd.DataFrame(data=collection)
+        theme_db = duckdb.from_df(data_frame)
         result = duckdb.query(f"""
             select 
                 tt.artist,
@@ -195,10 +199,26 @@ class Recommnender:
             order by play_count desc
             limit 50
         """)
+
+        if word2vec: 
+            try:
+                sample = data_frame.sample(frac=1).copy()
+                sample['TARGET'] = theme
+                sample.to_csv(f"data/{theme}_db.csv")
+
+                # del sample
+            except Exception as e:
+                print('error:', str(e))
         return result
 
 
-    def collections(self):
+
+    def classification(self, keywords):
+        ...
+
+
+
+    def collections(self, threshold=0.05):
         
         keywords = pd.read_csv('data/mxm_dataset_train.txt', comment='#', nrows=1) \
             .columns.to_list()
@@ -206,7 +226,7 @@ class Recommnender:
         print("Baseline")
         for theme in self.themes:
             print(f"_______________[Top 50 {theme}]_______________")
-            collection = self.collection(theme, keywords)
+            collection = self.collection(theme, keywords, threshold=threshold)
             print(collection)
             del collection
         
@@ -214,7 +234,7 @@ class Recommnender:
         
         for theme in self.themes:
             print(f"_______________[Top 50 {theme}]_______________")
-            collection = self.collection(theme, keywords, word2vec=True)
+            collection = self.collection(theme, keywords, threshold=threshold, word2vec=True)
             print(collection)
             del collection
 
@@ -234,9 +254,12 @@ def main():
     try:
         recommender = Recommnender()
 
-        recommender.top_250_tracks()
-        recommender.top_100_tracks_by_genre()
-        recommender.collections()
+        # recommender.top_250_tracks()
+        # recommender.top_100_tracks_by_genre()
+        recommender.collections(threshold=0.06)
+
+
+
 
 
     except Exception as e:
