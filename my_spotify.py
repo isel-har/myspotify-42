@@ -9,6 +9,7 @@ import duckdb
 # from sklearn.naive_bayes import MultinomialNB
 
 
+
 class Recommnender:
     def __init__(self):
         self.themes = {
@@ -135,87 +136,90 @@ class Recommnender:
         return None
 
 
-    def collection(self, theme, threshold, word2vec=False):
+    def collection(self, theme, threshold=0.25, word2vec=False, top_n=10, min_theme_words=5):
 
-        collection = {
-            'track_id':[],
-        }
+        collection = {'track_id': []}
+
+        # Fast keyword lookup
 
         theme_index = set()
 
-        for val in self.themes[theme]:
-            try:
-                index = self.keywords.index(val)
-                theme_index.add(index)
-                        
-            except ValueError:
-                continue
-    
+        for val in self.themes.get(theme, []):
+            idx = self.keyword_map.get(val)
+            if idx is not None:
+                theme_index.add(idx)
+
         if word2vec:
-            similar_tokens = self.word_vec(theme=theme, top_n=10)
-            for token, n in similar_tokens:
-                try:
-                    index = self.keywords.index(token)
-                    theme_index.add(index)
-                except ValueError:
+            similar_tokens = self.word_vec(theme=theme, top_n=top_n)
+
+            for token, score in similar_tokens:
+
+                if score < 0.5:
                     continue
 
+                idx = self.keyword_map.get(token)
+                if idx is not None:
+                    theme_index.add(idx)
+
         with open('data/mxm_dataset_train.txt', 'r') as f:
+
             for line in f:
+
                 if line.startswith(('%', '#')):
                     continue
 
                 parts = line.strip().split(',')
                 track_id = parts[0]
 
-                theme_score  = 0
-                total_words  = 0
+                theme_score = 0
+                total_words = 0
 
                 for part in parts[2:]:
+
                     word_index, count = part.split(':')
                     word_index = int(word_index)
-                    count      = int(count)
+                    count = int(count)
 
                     total_words += count
 
                     if word_index in theme_index:
                         theme_score += count
 
-                theme_ratio = theme_score / total_words if total_words else 0
+                if total_words == 0:
+                    continue
 
-                if theme_ratio > threshold:
+                theme_ratio = theme_score / total_words
+
+                # Improved filtering
+                if theme_ratio > threshold:# and theme_score >= min_theme_words:
                     collection['track_id'].append(track_id)
 
-        data_frame = pd.DataFrame(data=collection)
-        # theme_db = duckdb.from_df(data_frame)
-        # result = duckdb.query(f"""
-        #     select 
-        #         tt.artist,
-        #         tt.title,
-        #         sum(tt.play_count) as play_count
-        #     from
-        #         ({self.triplets_tracks_db('tdb.artist, tdb.title, sdb.play_count, tdb.track_id')}) as tt
-        #     join theme_db tm
-        #         on tt.track_id = tm.track_id
-        #     group by 
-        #         tt.track_id, tt.artist, tt.title
-        #     order by play_count desc
-        #     limit 50
-        # """)
+        data_frame = pd.DataFrame(collection)
 
-        if word2vec: 
-            try:
-                print("Data frame size:",len(data_frame))
-                n_sample = 1000 if len(data_frame) >= 1000 else len(data_frame)
-                print("max sample :",n_sample)
-                sample = data_frame.sample(n=n_sample).copy()
-                sample['TARGET'] = theme
-                sample.to_csv(f"data/train_themes.csv", mode='a', index=False, header=False)
+        if data_frame.empty:
+            print("No tracks found for theme:", theme)
+            return pd.DataFrame()
 
-                del sample
-            except Exception as e:
-                print('error:', str(e))
-        return None
+        theme_db = duckdb.from_df(data_frame)
+
+        result = duckdb.query(f"""
+            SELECT 
+                tt.artist,
+                tt.title,
+                SUM(tt.play_count) AS play_count
+            FROM
+                ({self.triplets_tracks_db('tdb.artist, tdb.title, sdb.play_count, tdb.track_id')}) AS tt
+            JOIN theme_db tm
+                ON tt.track_id = tm.track_id
+            GROUP BY 
+                tt.track_id, tt.artist, tt.title
+            ORDER BY play_count DESC
+            LIMIT 50
+        """)
+
+        print(f"Data frame (top:{top_n}, threshold:{threshold}) size:", len(data_frame))
+
+        return result
 
 
     def fill_vec(self, track_pairs, voc_size):
@@ -231,7 +235,6 @@ class Recommnender:
 
             vec[word_index] = count
         return vec
-
 
 
     def classification(self):
@@ -287,10 +290,12 @@ class Recommnender:
         # print(y_batch)
 
 
-    def collections(self, threshold=0.05):
+    def collections(self, threshold=0.05, top_n=10):
         
-        self.keywords = pd.read_csv('data/mxm_dataset_train.txt', comment='#', nrows=1) \
+        keywords = pd.read_csv('data/mxm_dataset_train.txt', comment='#', nrows=1) \
             .columns.to_list()
+
+        self.keyword_map = {w: i for i, w in enumerate(keywords)}
         # print(len(keywords))
         # print("Baseline")
         # for theme in self.themes:
@@ -303,12 +308,12 @@ class Recommnender:
         
         for theme in self.themes:
             print(f"_______________[Top 50 {theme}]_______________")
-            collection = self.collection(theme, threshold=threshold, word2vec=True)
-            # print(collection)
-            # del collection
+            collection = self.collection(theme, threshold=threshold, word2vec=True, top_n=top_n)
+            print(collection)
+            del collection
 
         # print("Classification")
-        self.classification()
+        # self.classification()
 
 
     def ten_similar(self):## collaborative filtering
@@ -322,11 +327,9 @@ def main():
 
     try:
         recommender = Recommnender()
-
         # recommender.top_250_tracks()
         # recommender.top_100_tracks_by_genre()
-        recommender.collections(threshold=0.06)
-
+        recommender.collections(threshold=0.3, top_n=100)
 
 
     except Exception as e:
