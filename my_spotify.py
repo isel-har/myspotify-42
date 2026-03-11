@@ -2,11 +2,12 @@
 # import polars as pl
 import gensim.downloader as api
 import pandas as pd
+import numpy as np
 import duckdb
-from sklearn.model_selection import train_test_split
-from sklearn.naive_bayes import MultinomialNB
 
-# import gc
+# from sklearn.model_selection import train_test_split
+# from sklearn.naive_bayes import MultinomialNB
+
 
 class Recommnender:
     def __init__(self):
@@ -42,6 +43,8 @@ class Recommnender:
 
         
         self.w2v_model = api.load("glove-wiki-gigaword-50")
+        # self.stop_words = set(stopwords.words("english"))
+
 
             # ROW_NUMBER() OVER (ORDER BY tdb.track_id) as index,
     def triplets_tracks_db(self, columns):
@@ -132,7 +135,7 @@ class Recommnender:
         return None
 
 
-    def collection(self, theme, keywords, threshold, word2vec=False):
+    def collection(self, theme, threshold, word2vec=False):
 
         collection = {
             'track_id':[],
@@ -142,7 +145,7 @@ class Recommnender:
 
         for val in self.themes[theme]:
             try:
-                index = keywords.index(val)
+                index = self.keywords.index(val)
                 theme_index.add(index)
                         
             except ValueError:
@@ -152,7 +155,7 @@ class Recommnender:
             similar_tokens = self.word_vec(theme=theme, top_n=10)
             for token, n in similar_tokens:
                 try:
-                    index = keywords.index(token)
+                    index = self.keywords.index(token)
                     theme_index.add(index)
                 except ValueError:
                     continue
@@ -184,62 +187,128 @@ class Recommnender:
                     collection['track_id'].append(track_id)
 
         data_frame = pd.DataFrame(data=collection)
-        theme_db = duckdb.from_df(data_frame)
-        result = duckdb.query(f"""
-            select 
-                tt.artist,
-                tt.title,
-                sum(tt.play_count) as play_count
-            from
-                ({self.triplets_tracks_db('tdb.artist, tdb.title, sdb.play_count, tdb.track_id')}) as tt
-            join theme_db tm
-                on tt.track_id = tm.track_id
-            group by 
-                tt.track_id, tt.artist, tt.title
-            order by play_count desc
-            limit 50
-        """)
+        # theme_db = duckdb.from_df(data_frame)
+        # result = duckdb.query(f"""
+        #     select 
+        #         tt.artist,
+        #         tt.title,
+        #         sum(tt.play_count) as play_count
+        #     from
+        #         ({self.triplets_tracks_db('tdb.artist, tdb.title, sdb.play_count, tdb.track_id')}) as tt
+        #     join theme_db tm
+        #         on tt.track_id = tm.track_id
+        #     group by 
+        #         tt.track_id, tt.artist, tt.title
+        #     order by play_count desc
+        #     limit 50
+        # """)
 
         if word2vec: 
             try:
-                sample = data_frame.sample(frac=1).copy()
+                print("Data frame size:",len(data_frame))
+                n_sample = 1000 if len(data_frame) >= 1000 else len(data_frame)
+                print("max sample :",n_sample)
+                sample = data_frame.sample(n=n_sample).copy()
                 sample['TARGET'] = theme
-                sample.to_csv(f"data/{theme}_db.csv")
+                sample.to_csv(f"data/train_themes.csv", mode='a', index=False, header=False)
 
-                # del sample
+                del sample
             except Exception as e:
                 print('error:', str(e))
-        return result
+        return None
+
+
+    def fill_vec(self, track_pairs, voc_size):
+        
+        vec = np.zeros(voc_size)
+
+        pairs = track_pairs.split(',')
+        for pair in pairs:
+            
+            word_index, count = pair.split(':')
+            word_index = int(word_index)
+            count      = int(count)
+
+            vec[word_index] = count
+        return vec
 
 
 
-    def classification(self, keywords):
-        ...
+    def classification(self):
+        
+        # x_batch = []
+        # y_batch = []
 
+        # voc_size = len(self.keywords)
+        # classes  = {
+        #     'love': np.float32(0.0),
+        #     'war': np.float32(1.0),
+        #     'happiness': np.float32(2.0),
+        #     'loneliness': np.float32(3.0),
+        #     'money':np.float32(4.0)
+        # }
+        
+        df = pd.read_csv('data/train_themes.csv', header=None, names=['track_id', 'theme'])
+        print("________________________________________________________________")
+        print((len(df[df['theme'] == 'love'])))
+        print((len(df[df['theme'] == 'war'])))
+        print((len(df[df['theme'] == 'money'])))
+        print((len(df[df['theme'] == 'loneliness'])))
+        print((len(df[df['theme'] == 'happiness'])))
+        # shuffled_df = df.sample(frac=1)
+        # print(shuffled_df)
+
+        # with open('data/train_themes.csv', 'r') as f:
+
+        #     for line in f:
+                
+        #         parts = line.split(',')
+        #         track_id = parts[0]
+        #         category = parts[1]
+
+
+        #         with open('data/mxm_dataset_train.txt', 'r') as ml:
+        #             for mline in ml:
+                        
+        #                 if mline.startswith(('#', '%')):
+        #                     continue
+
+        #                 track__id = mline[: mline.find(',')]
+        #                 if track_id == track__id:
+        #                     start = mline.find(',',  mline.find(',', len(track__id)) + 1)
+        #                     keywords_vec = "dwa"# self.fill_vec(mline[start:], voc_size)
+        #                     x_batch.append(keywords_vec)
+        #                     y_batch.append(classes[category])
+
+        #                     break
+        #         break
+        
+        # print(x_batch)
+        # print(y_batch)
 
 
     def collections(self, threshold=0.05):
         
-        keywords = pd.read_csv('data/mxm_dataset_train.txt', comment='#', nrows=1) \
+        self.keywords = pd.read_csv('data/mxm_dataset_train.txt', comment='#', nrows=1) \
             .columns.to_list()
-
-        print("Baseline")
+        # print(len(keywords))
+        # print("Baseline")
+        # for theme in self.themes:
+        #     print(f"_______________[Top 50 {theme}]_______________")
+        #     collection = self.collection(theme, threshold=threshold)
+        #     print(collection)
+        #     del collection
+        
+        # print("Word2vec")
+        
         for theme in self.themes:
             print(f"_______________[Top 50 {theme}]_______________")
-            collection = self.collection(theme, keywords, threshold=threshold)
-            print(collection)
-            del collection
-        
-        print("Word2vec")
-        
-        for theme in self.themes:
-            print(f"_______________[Top 50 {theme}]_______________")
-            collection = self.collection(theme, keywords, threshold=threshold, word2vec=True)
-            print(collection)
-            del collection
+            collection = self.collection(theme, threshold=threshold, word2vec=True)
+            # print(collection)
+            # del collection
 
-        print("Classification")
-
+        # print("Classification")
+        self.classification()
 
 
     def ten_similar(self):## collaborative filtering
@@ -257,8 +326,6 @@ def main():
         # recommender.top_250_tracks()
         # recommender.top_100_tracks_by_genre()
         recommender.collections(threshold=0.06)
-
-
 
 
 
