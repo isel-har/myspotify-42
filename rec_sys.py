@@ -1,18 +1,27 @@
+import os
+os.environ['GENSIM_DATA_DIR'] = '/Users/isel-har/goinfre/gensim'
+
 import numpy as np
 import pandas as pd
 import duckdb
-
-
 from sklearn.naive_bayes import MultinomialNB
 import gensim.downloader as api
 from nltk.corpus import stopwords
 # from scipy.sparse import csr_matrix
-
 from tools import train_test_split_matrix, compute_item_similarity, recommend, precision_at_k
 from tools import train_svd, recommend_svd, compute_scores, precision_at_k_svd
+from sklearn.model_selection import train_test_split
+from sklearn.utils.class_weight import compute_sample_weight
+from sklearn.metrics import accuracy_score
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import LabelEncoder
+import joblib
+
 
 
 # pd.set_option('display.max_rows', None)
+import nltk
+nltk.download('stopwords')
 
 
 class Recommender:
@@ -147,7 +156,6 @@ class Recommender:
 
         theme_index = set()
 
-
         for val in self.themes.get(theme, []):
             idx = self.keyword_map.get(val)
             if idx is not None:
@@ -163,7 +171,6 @@ class Recommender:
                 if idx is not None:
                     theme_index.add(idx)
         
-
         with open('data/mxm_dataset_train.txt', 'r') as f:
 
             for line in f:
@@ -222,69 +229,122 @@ class Recommender:
         """)
 
         print(data_frame.shape)
-        if not word2vec:
+        if word2vec:
             data_frame.to_csv(f'data/{theme}_data.csv', index=False, header=False)
-                # 200 if data_frame.shape[0] >= 200 else data_frame.shape[0]
+            print(f"data frame saved as data/{theme}_data.csv for training")
         return result
 
 
+    def mxm_dict(self):
 
+        m_dict = {}
 
-    def vectorizer(self, df):
-
-        X_vectors = []
-        y_vectors = []
         with open('data/mxm_dataset_train.txt', 'r') as f:
-        
+            
             for line in f:
-                
+
+                words_count =  np.zeros(self.vocabulary_size)       
                 if line.startswith(('%', '#')):
                     continue
 
                 parts    = line.strip().split(',')
                 track_id = parts[0]
-                theme    = str()
-                try:
-                    theme  = df.loc[track_id, 'theme']
-                    if isinstance(theme, pd.Series):
-                        continue
-
-                except:
-                    continue
-                
-                vec = np.zeros(self.vocabulary_size)
                 for part in parts[2:]:
 
                     word_index, count     = part.split(':')
                     word_index            = int(word_index)
                     count                 = int(count)
-                    vec[word_index - 1]   = count
-                    X_vectors.append(vec)
-                    y_vectors.append(self.class_labels[theme])
+                    if word_index not in self.stop_words_idx:
+                        words_count[word_index - 1] = count
+                
+                m_dict[track_id] = words_count
 
-        return np.array(X_vectors), np.array(y_vectors)
-    
+        return m_dict
 
 
-    def classification(self):
+    def vectorizer(self, mxm_dict=None, track_id_list=None):
+        
+        vectors_list = []
+        for track_id in track_id_list:
+            try:
+                vectors_list.append(mxm_dict[track_id])
+            except Exception as e:
+                print("track id :", track_id)
+                print("error :", str(e))
+        return np.array(vectors_list)  
+
+
+
+
+    def preprocessing(self, test_size=0.2):
         
         df = None
-
         for theme in self.themes:
-            theme_df = pd.read_csv(f"data/{theme}_data.csv", header=None, names=['track_id', 'theme', 'theme_ratio'])
+            theme_df = pd.read_csv(
+                f"data/{theme}_data.csv",
+                names=['track_id', 'theme', 'theme_ratio'],
+                header=None
+            )
             df = pd.concat([df, theme_df])
 
         df = df.sample(frac=1)
-        df.set_index('track_id', inplace=True)
+        df = df.drop_duplicates()
 
-        self.class_labels = {theme:float(label) for label, theme in enumerate(self.themes)}
-        self.vocabulary_size = max(self.keyword_map.values())
-       
-        X_train, y_train = self.vectorizer(df)
+        X_train, X_test, y_train, y_test = train_test_split(
+            df['track_id'],
+            df['theme'],
+            test_size=test_size,
+            stratify=df['theme'],
+            random_state=42
+        )
 
-        model = MultinomialNB()## class imbalance (loneliness)
-        model.fit(X=X_train, y=y_train)
-        return model
+        le   = LabelEncoder()
+        mx_dict = self.mxm_dict()
+
+        X_train = self.vectorizer(mx_dict, X_train.values.tolist()).astype(np.float32)
+        X_test  = self.vectorizer(mx_dict, X_test.values.tolist()).astype(np.float32)
+
+
+        le.fit(pd.concat([y_train, y_test]))
+        y_train  = le.transform(y_train)
+        y_test  =  le.transform(y_test)
+    
+        joblib.dump(X_train, "data/X_train.pkl")
+        joblib.dump(X_test, "data/X_test.pkl")
+        joblib.dump(y_train, "data/y_train.pkl")
+        joblib.dump(y_test, "data/y_test.pkl")
+        joblib.dump(le.classes_, "data/classes.pkl")
+
+        print("preprocessed train/test split and classes saved at data/")
+
+
+
+    def classifier(self):
+        
+        X_train, X_test, y_train, y_test = joblib.load('data/X_train.pkl'), joblib.load('data/X_test.pkl'), \
+            joblib.load('data/y_train.pkl'), joblib.load('data/y_test.pkl')
+
+
+        clf = MLPClassifier(
+            hidden_layer_sizes=(256, 128),
+            batch_size=16,
+            random_state=42,
+            max_iter=100,
+            solver='adam',
+            activation='relu',
+            early_stopping=True
+        )
+
+        sample_weight = compute_sample_weight(class_weight='balanced', y=y_train)
+        clf.fit(X_train, y_train, sample_weight=sample_weight)
+
+        y_pred = clf.predict(X_test)
+
+        print(f"accuracy {accuracy_score(y_true=y_test, y_pred=y_pred)}")
+        
+        
+
+
 
 
     def collection_classification(self, theme, model, theme_index, threshold=0.7):
@@ -339,6 +399,7 @@ class Recommender:
         """)
         return result
 
+
     def collections(self):
         
         keywords = pd.read_csv('data/mxm_dataset_train.txt', comment='#', nrows=1) \
@@ -346,32 +407,36 @@ class Recommender:
         keywords[0] = 'i'
         self.keyword_map = {
             w: i for i, w in enumerate(keywords, start=1)
-            if w not in self.stop_words
+            if w not in self.stop_words 
+        }
+        self.vocabulary_size = max( self.keyword_map.values() )
+        self.stop_words_idx = {
+            w: i for i, w in enumerate(keywords, start=1)
+            if w in self.stop_words
         }
 
-        print("baseline approache")
-        for theme in self.themes:
-            print(f"theme : {theme}")
-            collection = self.collection(theme, threshold=0.07, min_theme_words=5)
-            print(collection)
-            del collection
+        # print("baseline approache")
+        # for theme in self.themes:
+        #     print(f"theme : {theme}")
+        #     collection = self.collection(theme, threshold=0.065, min_theme_words=5)
+        #     print(collection)
+        #     del collection
         
-        print("word2vec approache")
-        
-        for theme in self.themes:
-            print(f"theme : {theme}")
-            collection = self.collection(theme, threshold=0.072, word2vec=True, top_n=10, min_theme_words=5)
-            print(collection)
-            del collection
+        # print("word2vec approache")
+        # for theme in self.themes:
+        #     print(f"theme : {theme}")
+        #     collection = self.collection(theme, threshold=0.07, word2vec=True, top_n=10, min_theme_words=5)
+        #     print(collection)
+        #     del collection
 
-        # print("classification approache")
+        # self.preprocessing()
+        # print("classification approache")## slow and not accuracte!
         # model = self.classification()
         # for i, theme in enumerate(self.themes):
         #     print(f"theme : {theme}")
         #     collection = self.collection_classification("love", model, i)
         #     print(collection)
         #     del collection
-
 
 
     def cosine_similarity_approach(self, user_id, train_matrix, test_matrix):
@@ -445,7 +510,7 @@ class Recommender:
         user_item_matrix          = self.user_item_matrix()
         train_matrix, test_matrix = train_test_split_matrix(user_item_matrix)
 
-        top_10_rec, p_at_10  = self.cosine_similarity_approach(user_id, train_matrix, test_matrix)
+        top_10_rec, p_at_10  = self.cosine_similarity_approach(user_id, train_matrix, test_matrix)()
 
         # print("cosine similarity approach")
         # print("Average p@10:", p_at_10)
