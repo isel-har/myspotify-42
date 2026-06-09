@@ -1,31 +1,33 @@
+from cgi import test
 import os
+from re import T
 os.environ['GENSIM_DATA_DIR'] = '/Users/isel-har/goinfre/gensim'
 
 import numpy as np
 import pandas as pd
 import duckdb
-from sklearn.naive_bayes import MultinomialNB
 import gensim.downloader as api
 from nltk.corpus import stopwords
-# from scipy.sparse import csr_matrix
-from tools import train_test_split_matrix, compute_item_similarity, recommend, precision_at_k
-from tools import train_svd, recommend_svd, compute_scores, precision_at_k_svd
+from tools.tools import train_test_split_matrix, compute_item_similarity, recommend, precision_at_k
+from tools.tools import train_svd, recommend_svd, compute_scores, precision_at_k_svd
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_sample_weight
 from sklearn.metrics import accuracy_score
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import LabelEncoder
 import joblib
+from tools.nn_classes import NCFRecommender
+from tools.train import train
+from torch.utils.data import DataLoader, TensorDataset
 
-
-
+import torch
 # pd.set_option('display.max_rows', None)
 import nltk
 nltk.download('stopwords')
 
 
 class Recommender:
-    def __init__(self, load_word2vec=False):
+    def __init__(self, load_word2vec=True):
         self.themes = {
             'love': ['love', 'heart', 'kiss', 'romance', 'lover', 'baby', 'honey'],
             'war': ['war', 'fight', 'battle', 'soldier', 'gun', 'blood'],
@@ -275,11 +277,10 @@ class Recommender:
 
 
 
-
-    def preprocessing(self, test_size=0.2):
+    def preprocessing(self):
         
         df = None
-        for theme in self.themes:
+        for theme in ['love', 'war', 'happiness']:
             theme_df = pd.read_csv(
                 f"data/{theme}_data.csv",
                 names=['track_id', 'theme', 'theme_ratio'],
@@ -293,13 +294,15 @@ class Recommender:
         X_train, X_test, y_train, y_test = train_test_split(
             df['track_id'],
             df['theme'],
-            test_size=test_size,
+            test_size=0.2,
             stratify=df['theme'],
             random_state=42
         )
 
         le   = LabelEncoder()
         mx_dict = self.mxm_dict()
+
+        joblib.dump(X_test, "data/track_ids_test.pkl")
 
         X_train = self.vectorizer(mx_dict, X_train.values.tolist()).astype(np.float32)
         X_test  = self.vectorizer(mx_dict, X_test.values.tolist()).astype(np.float32)
@@ -318,13 +321,10 @@ class Recommender:
         print("preprocessed train/test split and classes saved at data/")
 
 
-
     def classifier(self):
         
-        X_train, X_test, y_train, y_test = joblib.load('data/X_train.pkl'), joblib.load('data/X_test.pkl'), \
-            joblib.load('data/y_train.pkl'), joblib.load('data/y_test.pkl')
-
-
+        X_train, y_train= joblib.load('data/X_train.pkl'), joblib.load('data/y_train.pkl')
+    
         clf = MLPClassifier(
             hidden_layer_sizes=(256, 128),
             batch_size=16,
@@ -337,70 +337,52 @@ class Recommender:
 
         sample_weight = compute_sample_weight(class_weight='balanced', y=y_train)
         clf.fit(X_train, y_train, sample_weight=sample_weight)
-
-        y_pred = clf.predict(X_test)
-
-        print(f"accuracy {accuracy_score(y_true=y_test, y_pred=y_pred)}")
-        
-        
+        return clf
 
 
+    def collection_classification(self):
 
+        X_test, y_test = joblib.load('data/X_test.pkl'), joblib.load('data/y_test.pkl')
+        classes_, track_ids = joblib.load('data/classes.pkl'), joblib.load('data/track_ids_test.pkl')
 
-    def collection_classification(self, theme, model, theme_index, threshold=0.7):
+        model = self.classifier()
 
-        collection = {'track_id': []}
-        with open('data/mxm_dataset_train.txt', 'r') as f:
+        y_pred = model.predict(X_test)
 
-                for line in f:
+        themes = [classes_[l] for l in y_pred.tolist()]
+        pred_db = duckdb.from_df(
+            pd.DataFrame({
+                'track_id':track_ids,
+                'theme': themes
+            })
+        )
+        for theme in ['love', 'war', 'happiness']:
+            
+            print(f"theme : {theme}")
 
-                    if line.startswith(('%', '#')):
-                        continue
-
-                    parts = line.strip().split(',')
-                    track_id = parts[0]
-
-                    vec = np.zeros(self.vocabulary_size)
-                    for part in parts[2:]:
-
-                        word_index, count = part.split(':')
-                        word_index        = int(word_index)
-                        count             = int(count)
-                        vec[word_index - 1] = count   
-                    
-                    pred_ratios = model.predict_proba([vec])
-                    pred_theme = model.predict([vec])
-
-
-                    if pred_ratios[0][theme_index] >= threshold and  pred_theme[0] == self.class_labels[theme]:
-                        collection['track_id'].append(track_id)
-
-
-        data_frame = pd.DataFrame(collection)
-
-        if data_frame.empty:
-            print("No tracks found for theme:", theme)
-            return pd.DataFrame()
-
-        theme_db = duckdb.from_df(data_frame)
-        result   = duckdb.query(f"""
+            result   = duckdb.query(f"""
             SELECT 
                 tt.artist,
                 tt.title,
                 SUM(tt.play_count) AS play_count
             FROM
                 ({self.triplets_tracks_db('tdb.artist, tdb.title, sdb.play_count, tdb.track_id')}) AS tt
-            JOIN theme_db tm
+            JOIN (select * from pred_db where theme like '{theme}') as tm
                 ON tt.track_id = tm.track_id
-            GROUP BY 
+            GROUP BY    
                 tt.track_id, tt.artist, tt.title
+
             ORDER BY play_count DESC
             LIMIT 50
-        """)
-        return result
+            """)
 
+            print(result)
+        
+        print(f"classifier accuracy reached on test set : {accuracy_score(y_pred=y_pred, y_true=y_test)}")
 
-    def collections(self):
+            
+        
+    def collections(self, process=False):
         
         keywords = pd.read_csv('data/mxm_dataset_train.txt', comment='#', nrows=1) \
             .columns.to_list()
@@ -415,28 +397,26 @@ class Recommender:
             if w in self.stop_words
         }
 
-        # print("baseline approache")
-        # for theme in self.themes:
-        #     print(f"theme : {theme}")
-        #     collection = self.collection(theme, threshold=0.065, min_theme_words=5)
-        #     print(collection)
-        #     del collection
+        print("baseline approach")
+        for theme in ['love', 'war', 'happiness']:
+            print(f"theme : {theme}")
+            collection = self.collection(theme, threshold=0.065, min_theme_words=5)
+            print(collection)
+            del collection
         
-        # print("word2vec approache")
-        # for theme in self.themes:
-        #     print(f"theme : {theme}")
-        #     collection = self.collection(theme, threshold=0.07, word2vec=True, top_n=10, min_theme_words=5)
-        #     print(collection)
-        #     del collection
+        print("word2vec approach")
+        for theme in ['love', 'war', 'happiness']:
+            print(f"theme : {theme}")
+            collection = self.collection(theme, threshold=0.07, word2vec=True, top_n=10, min_theme_words=5)
+            print(collection)
+            del collection
 
-        # self.preprocessing()
-        # print("classification approache")## slow and not accuracte!
-        # model = self.classification()
-        # for i, theme in enumerate(self.themes):
-        #     print(f"theme : {theme}")
-        #     collection = self.collection_classification("love", model, i)
-        #     print(collection)
-        #     del collection
+        print("Classification approach")
+        if process:
+            self.preprocessing()
+        self.collection_classification()#!happiness 12 rows
+
+
 
 
     def cosine_similarity_approach(self, user_id, train_matrix, test_matrix):
@@ -510,13 +490,12 @@ class Recommender:
         user_item_matrix          = self.user_item_matrix()
         train_matrix, test_matrix = train_test_split_matrix(user_item_matrix)
 
-        top_10_rec, p_at_10  = self.cosine_similarity_approach(user_id, train_matrix, test_matrix)()
+        top_10_rec, p_at_10  = self.cosine_similarity_approach(user_id, train_matrix, test_matrix)
 
-        # print("cosine similarity approach")
-        # print("Average p@10:", p_at_10)
-        # print("top 10 recommendation:")
-        # print(top_10_rec)
-
+        print("cosine similarity approach")
+        print("Average p@10:", p_at_10)
+        print("top 10 recommendation:")
+        print(top_10_rec)
 
         # top_10_rec, p_at_10 = self.matrix_factorization_approach(user_id, train_matrix, test_matrix)
 
@@ -524,3 +503,86 @@ class Recommender:
         # print("Average p@10:", p_at_10)
         # print("top 10 recommendation:")
         # print(top_10_rec)
+
+
+    def user_item_tensor(self, users_limit=50, songs_limit=50):
+
+        triplets = self.user_item_matrix(only_triples=True, users_limit=users_limit, songs_limit=songs_limit)    
+        users  = triplets['user_id'].to_numpy()
+        items  = triplets['song_id'].to_numpy()
+        labels = triplets['play_count'].to_numpy()
+
+        user_encoder = LabelEncoder()
+        item_encoder = LabelEncoder()
+
+        users = user_encoder.fit_transform(users)
+        items = item_encoder.fit_transform(items)
+
+        users  = torch.tensor(users,  dtype=torch.long)
+        items  = torch.tensor(items,  dtype=torch.long)
+        labels = torch.tensor(labels, dtype=torch.float32)
+        return users, items, labels
+
+
+    def recommend_top_k_inference(model, user_id, dataset, k=10, device="cpu"):
+        model.eval()
+
+        user_tensor = torch.tensor([user_id] * len(dataset)).to(device)
+        item_tensor = torch.tensor(dataset).to(device)
+
+        with torch.no_grad():
+            scores = model(user_tensor, item_tensor)
+
+            # If using BCEWithLogitsLoss → apply sigmoid
+            scores = torch.sigmoid(scores)
+
+        scores = scores.cpu().numpy().flatten()
+        # Get top-k indices
+        top_k_idx = scores.argsort()[-k:][::-1]
+        return [(dataset[i], scores[i]) for i in top_k_idx]
+    
+
+    def tensor_train_test_split(self, users_limit=50, songs_limit=50):
+        users, items, labels = self.user_item_tensor(users_limit, songs_limit)
+    
+        users_train, users_test, items_train, items_test, y_train, y_test = train_test_split(
+            users, items, labels, test_size=0.2, random_state=42
+        )
+
+        y_train = (y_train > 0).float().unsqueeze(1)
+        y_test  = (y_test > 0).float().unsqueeze(1)
+
+        train_loader = DataLoader(
+            TensorDataset(users_train, items_train, y_train),
+            batch_size=32
+        )
+
+        test_loader = DataLoader(
+            TensorDataset(users_test, items_test, y_test),
+            batch_size=32
+        )
+
+        return train_loader, test_loader
+
+    
+
+    def ncf_recommendation(self, user_id, train_loader, test_loader):
+
+    
+        ncf = NCFRecommender(num_users=num_users, num_items=num_items, embedding_dim=8)
+
+        ncf = train(ncf, train_loader)
+
+        return self.recommend_top_k_inference(ncf, user_id, test_loader)
+
+
+    def neumf_recommendation(self, user_id=''):
+
+        ...
+
+    def neural_recommendation(self, user_id):
+        train_loader, test_loader = self.tensor_train_test_split()
+        
+        self.ncf_recommendation(user_id, train_loader, test_loader)
+        self.neumf_recommendation(user_id, train_loader, test_loader)
+        ## third solution!
