@@ -1,5 +1,6 @@
 import argparse
-from rec_sys import Recommender
+from tools.rec_sys import Recommender
+from tools.tools import train_test_split_matrix
 import sys
 
 
@@ -29,17 +30,58 @@ def main():
 
     process, user_id = parse_args()
     recommender = Recommender()
+    themes = ['love', 'war','happiness']
 
-    recommender.top_250_tracks()
-    recommender.top_100_tracks_by_genre()
-    recommender.collections(process=process)
-    recommender.user_based_recommendation(user_id)
+    df = recommender.top_250_tracks()
+    print("Top-250 tracks")
+    print(df)
 
+    genres = recommender.get_genres()
+    for genre in genres:
+
+        df = recommender.top_100_tracks_by_genre(genre)
+        print(f"top 100 of genre '{genre}'")
+        print(df)
+
+
+    print("baseline approach")
+    for theme in themes:
+        df = recommender.collections(theme=theme)
+        print(df)
+
+    print("Word2vec approach")
+    for theme in themes:
+        df = recommender.collections(theme=theme, approach='word2vec')
+        print(df)
+
+    print("classification approach")
+    for theme in themes:
+        df = recommender.collections(
+            theme=theme,
+            process=process,
+            approach='classification'
+        )
+        print(df)
+
+
+    user_item_matrix = recommender.user_item_matrix()
+    train_matrix, test_matrix = train_test_split_matrix(user_item_matrix)
+
+    top_10, p_at_10 = recommender.user_based_recommendation(user_id, train_matrix, test_matrix)
+    print("consine similarity approach")
+    print("Average p@10:", p_at_10)
+    print("top 10 recommendation:")
+    print(top_10)
+    top_10, p_at_10 = recommender.user_based_recommendation(user_id, train_matrix, test_matrix, False)
+    print("Matrix factorization approach")
+    print("Average p@10:", p_at_10)
+    print("top 10 recommendation:")
+    print(top_10)
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print()
+        print(f"exception : {str(e)}")
         sys.exit(1)
