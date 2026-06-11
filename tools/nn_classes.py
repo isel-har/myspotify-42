@@ -22,33 +22,32 @@ class NCFRecommender(nn.Module):
         return self.fc(x)
 
 
-class NeuMF(nn.Module):
-    def __init__(self, num_users, num_items, mf_dim=16, mlp_dim=32):
+class ItemEncoder(nn.Module):
+    def __init__(self, n_artists, n_genres, d=64):
         super().__init__()
 
-        # MF embeddings
-        self.mf_user = nn.Embedding(num_users, mf_dim)
-        self.mf_item = nn.Embedding(num_items, mf_dim)
-
-
-        # MLP embeddings
-        self.mlp_user = nn.Embedding(num_users, mlp_dim)
-        self.mlp_item = nn.Embedding(num_items, mlp_dim)
+        self.artist_emb = nn.Embedding(n_artists, d)
+        self.genre_emb  = nn.Embedding(n_genres, d)
 
         self.mlp = nn.Sequential(
-            nn.Linear(mlp_dim * 2, 64), nn.ReLU(),
-            nn.Linear(64, 32),          nn.ReLU(),
+            nn.Linear(d * 2, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64)
         )
-        self.output = nn.Linear(mf_dim + 32, 1)
 
-    def forward(self, user, item):
-        # MF path: element-wise product
-        mf_out = self.mf_user(user) * self.mf_item(item)
+    def forward(self, artist_id, genre_id):
+        x = torch.cat([
+            self.artist_emb(artist_id),
+            self.genre_emb(genre_id)
+        ], dim=1)
+        return self.mlp(x)
 
-        # MLP path: concatenation through layers
-        mlp_in = torch.cat([self.mlp_user(user), self.mlp_item(item)], dim=1)
-        mlp_out = self.mlp(mlp_in)
 
-        # Merge both paths
-        combined = torch.cat([mf_out, mlp_out], dim=1)
-        return self.output(combined)
+class UserEncoder(nn.Module):
+    def __init__(self, n_users, d=64):
+        super().__init__()
+        self.user_emb = nn.Embedding(n_users, d)
+
+    def forward(self, user_id):
+        return self.user_emb(user_id)
+

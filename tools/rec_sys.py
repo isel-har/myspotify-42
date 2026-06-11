@@ -1,6 +1,7 @@
 import os
 
 from sklearn import base
+
 os.environ['GENSIM_DATA_DIR'] = '/Users/isel-har/goinfre/gensim'
 
 import numpy as np
@@ -19,13 +20,14 @@ from sklearn.utils.class_weight import compute_sample_weight
 from sklearn.metrics import accuracy_score
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import OneHotEncoder
 
-from tools.nn_classes import NCFRecommender
+from tools.nn_classes import NCFRecommender, ItemEncoder, UserEncoder
 from tools.train import train
 from torch.utils.data import DataLoader, TensorDataset
 from tools.tools import  compute_item_similarity, recommend, precision_at_k
 from tools.tools import train_svd, recommend_svd, compute_scores, precision_at_k_svd
-
+from sklearn.metrics.pairwise import cosine_similarity
 
 class Recommender:
 
@@ -562,7 +564,7 @@ class Recommender:
         return [(dataset[i], scores[i]) for i in top_k_idx]
     
 
-    def tensor_train_test_split(self, users_limit=50, songs_limit=50):
+    def dataloader_train_test_split(self, users_limit=50, songs_limit=50):
         users, items, labels = self.user_item_tensor(users_limit, songs_limit)
     
         users_train, users_test, items_train, items_test, y_train, y_test = train_test_split(
@@ -584,11 +586,10 @@ class Recommender:
 
         return train_loader, test_loader
 
-    
 
     def ncf_recommendation(self, user_id, train_loader, test_loader):
 
-    
+        
         ncf = NCFRecommender(num_users=num_users, num_items=num_items, embedding_dim=8)
 
         ncf = train(ncf, train_loader)
@@ -596,13 +597,76 @@ class Recommender:
         return self.recommend_top_k_inference(ncf, user_id, test_loader)
 
 
-    def neumf_recommendation(self, user_id=''):
-
-        ...
-
-    def neural_recommendation(self, user_id):
-        train_loader, test_loader = self.tensor_train_test_split()
+    def user_profile_df(self, user_id):
+        user_history_query = f"""
+        with tracks_db as (
+            select tdb.track_id, tdb.artist, sdb.play_count from {self.train_triplets_db} as sdb
+            join (
+                select 
+                    parts[1]::VARCHAR AS track_id,
+                    parts[2]::VARCHAR AS song_id,
+                    parts[3]::VARCHAR AS artist
+                    from ({self.unique_tracks_db})
+            ) as tdb
+            on sdb.song_id = tdb.song_id
+            where sdb.user_id like '{user_id}'
+            order by sdb.play_count desc
+            )
+            select tracks_db.*, mdb.genre from tracks_db
+            join (
+                select * from {self.mds_tagtraum_db}
+            ) as mdb
+            on mdb.track_id = tracks_db.track_id
+        """
+        return duckdb.query(user_history_query).to_df()
         
-        self.ncf_recommendation(user_id, train_loader, test_loader)
-        self.neumf_recommendation(user_id, train_loader, test_loader)
-        ## third solution!
+    def items_matrix_split(self, user_profile_df):
+        artist_encoder = OneHotEncoder(sparse_output=False)
+        genre_encoder  = OneHotEncoder(sparse_output=False)
+
+        encoded_artist = artist_encoder.fit_transform(user_profile_df['artist'].to_numpy().reshape(-1, 1))
+        encoded_genre  = genre_encoder.fit_transform(user_profile_df['genre'].to_numpy().reshape(-1, 1))
+    
+        items_matrix = np.concatenate([encoded_artist, encoded_genre], axis=1)
+
+        df_indices = [i for i in range(len(user_profile_df))]
+
+        items_train, items_test, indices_train, indices_test = train_test_split(
+            items_matrix,
+            df_indices,
+            test_size=0.2,
+            shuffle=True,
+            random_state=42
+        )
+        return items_train, items_test, indices_train, indices_test
+
+
+    def content_based_recommendation(self, user_profile_df, baseline=True):
+
+        top_idx = None
+
+        if baseline:
+            items_train, items_test, indices_train, indices_test = self.items_matrix_split(user_profile_df)
+            play_count_train =  user_profile_df['play_count'].iloc[indices_train].to_numpy()
+            user_taste = np.sum(play_count_train[:, None] * items_train, axis=0) / np.sum(play_count_train)
+            sim = cosine_similarity(user_taste.reshape(1, -1), items_test)
+            
+            flat = sim.ravel()
+
+            top_idx = np.argpartition(flat, -10)[-10:]
+            top_idx = top_idx[np.argsort(flat[top_idx])[::-1]]
+
+
+        n_artists = len(user_profile_df['artist'].unique())
+        n_genres  = len(user_profile_df['genre'].unique())
+
+        # items_matrix = ItemEncoder(n_artists, n_genres)
+        # item_vec = torch.cat([artist_emb, genre_emb], dim=1)
+        # item_vec = MLP(item_vec)
+        # user_vec     = UserEncoder(1)
+
+        # score = (user_vec * item_vec).sum(dim=1)
+        # loss = BCEWithLogitsLoss()(score, label)
+                
+
+        return top_idx
