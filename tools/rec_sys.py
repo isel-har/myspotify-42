@@ -1,3 +1,5 @@
+from cgi import test
+from distutils.command.bdist import show_formats
 import os
 
 from sklearn import base
@@ -10,6 +12,7 @@ import duckdb
 import joblib
 import torch
 import nltk
+import torch.nn as nn
 
 import gensim.downloader as api
 from nltk.corpus import stopwords
@@ -22,9 +25,9 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import OneHotEncoder
 
-from tools.nn_classes import NCFRecommender, ItemEncoder, UserEncoder
+from tools.nn_classes import NCFRecommender, ContentBasedNN
 from tools.train import train
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, Subset
 from tools.tools import  compute_item_similarity, recommend, precision_at_k
 from tools.tools import train_svd, recommend_svd, compute_scores, precision_at_k_svd
 from sklearn.metrics.pairwise import cosine_similarity
@@ -587,17 +590,21 @@ class Recommender:
         return train_loader, test_loader
 
 
+
+    # def train(self, model)
+
+
     def ncf_recommendation(self, user_id, train_loader, test_loader):
 
         
         ncf = NCFRecommender(num_users=num_users, num_items=num_items, embedding_dim=8)
 
-        ncf = train(ncf, train_loader)
+        ncf = self.train(ncf, train_loader)
 
         return self.recommend_top_k_inference(ncf, user_id, test_loader)
 
 
-    def user_profile_df(self, user_id):
+    def user_profile_df(self, user_id=None, limit=0):
         user_history_query = f"""
         with tracks_db as (
             select tdb.track_id, tdb.artist, sdb.play_count from {self.train_triplets_db} as sdb
@@ -607,9 +614,10 @@ class Recommender:
                     parts[2]::VARCHAR AS song_id,
                     parts[3]::VARCHAR AS artist
                     from ({self.unique_tracks_db})
+                    {f"limit {limit}" if limit > 0 else ''}
             ) as tdb
             on sdb.song_id = tdb.song_id
-            where sdb.user_id like '{user_id}'
+            {"where sdb.user_id like '{user_id}'" if user_id else ''}
             order by sdb.play_count desc
             )
             select tracks_db.*, mdb.genre from tracks_db
@@ -655,18 +663,91 @@ class Recommender:
 
             top_idx = np.argpartition(flat, -10)[-10:]
             top_idx = top_idx[np.argsort(flat[top_idx])[::-1]]
+            return user_profile_df.iloc[top_idx].sort_values(by='play_count', ascending=False)
 
 
-        n_artists = len(user_profile_df['artist'].unique())
-        n_genres  = len(user_profile_df['genre'].unique())
+        test_df = self.user_profile_df(limit=100)
+        user_profile_df = user_profile_df.sample(frac=1, random_state=42)
 
-        # items_matrix = ItemEncoder(n_artists, n_genres)
-        # item_vec = torch.cat([artist_emb, genre_emb], dim=1)
-        # item_vec = MLP(item_vec)
-        # user_vec     = UserEncoder(1)
+        
 
-        # score = (user_vec * item_vec).sum(dim=1)
-        # loss = BCEWithLogitsLoss()(score, label)
-                
 
-        return top_idx
+        # n_artists = len(user_profile_df['artist'].unique())
+        # n_genres  = len(user_profile_df['genre'].unique())
+
+        # labels  = torch.tensor(
+        #     np.where(user_profile_df['play_count'] >= 15, 1, 0).astype(np.float32)
+        # ).unsqueeze(1)                                          # shape: (N, 1)
+
+        # artists = torch.from_numpy(
+        #     LabelEncoder().fit_transform(user_profile_df['artist'])
+        # ).long()
+
+        # genres  = torch.from_numpy(
+        #     LabelEncoder().fit_transform(user_profile_df['genre'])
+        # ).long()
+
+        # dataset = TensorDataset(artists, genres, labels)
+
+        # train_idx, test_idx = train_test_split(
+        #     np.arange(len(dataset)),
+        #     test_size=0.2,
+        #     stratify=labels.squeeze().numpy(),                  # ← fix: squeeze + numpy
+        #     random_state=42
+        # )
+
+        # train_dataset = Subset(dataset, train_idx)
+        # test_dataset  = Subset(dataset, test_idx)
+
+        # train_loader = DataLoader(
+        #     train_dataset,
+        #     batch_size=16,
+        #     shuffle=True                                        # ← fix: shuffle train
+        # )
+
+        # cbn       = ContentBasedNN(num_artists=n_artists, num_genres=n_genres)
+        # optimizer = torch.optim.Adam(cbn.parameters(), lr=0.001)
+        # criterion = nn.BCELoss()
+
+        # for epoch in range(30):
+        #     cbn.train()
+        #     total_loss = 0
+
+        #     for artists, genres, labels in train_loader:
+        #         optimizer.zero_grad()
+        #         predictions = cbn(artists, genres)
+        #         loss        = criterion(predictions, labels)
+        #         loss.backward()
+        #         optimizer.step()
+        #         total_loss += loss.item()
+
+        #     print(f"Epoch {epoch+1}, Loss: {total_loss / len(train_loader):.4f}")
+
+        # test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+
+        # cbn.eval()
+        # correct = 0
+        # total   = 0
+
+        # with torch.no_grad():
+        #     for artists, genres, labels in test_loader:
+
+        #         outputs = cbn(artists, genres)
+        #         preds   = torch.round(outputs).squeeze()
+        #         labels  = labels.squeeze()
+        #         correct += (preds == labels).sum().item()
+        #         # print((preds == 1))
+        #         # print(labels)
+        #         # print(preds)
+        #         # indices = test_idx[passed_batch:len(labels) + passed_batch]
+
+        # #         np.ar(preds == 1).numpy()      # ← fix: round for binary
+        #         # labels  = labels.squeeze()                      # ← fix: squeeze labels
+
+        #         total   += labels.size(0)
+        #         # passed_batch += len(labels)
+
+        # accuracy = correct / total
+        # print(f"Accuracy: {accuracy:.4f}")
+        
+       

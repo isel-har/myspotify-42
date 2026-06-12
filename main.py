@@ -82,15 +82,13 @@ def main():
 
 
     print("Bonus part")
-    print("Content-based cosine similarity approach")
+    # print("Content-based cosine similarity approach")
 
     user_profile_df = recommender.user_profile_df(user_id)
-    top_idx = recommender.content_based_recommendation(user_profile_df)
-    top_10 = user_profile_df.iloc[top_idx].sort_values(by='play_count', ascending=False)
-    print(top_10)
+    # top_10 = recommender.content_based_recommendation(user_profile_df)
 
 
-    # top_10 = recommender.content_based_recommendation(user_taste, items_test, False)
+    recommender.content_based_recommendation(user_profile_df, False)
     # print(top_10)# add p@10
 
 

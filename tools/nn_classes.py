@@ -22,32 +22,44 @@ class NCFRecommender(nn.Module):
         return self.fc(x)
 
 
-class ItemEncoder(nn.Module):
-    def __init__(self, n_artists, n_genres, d=64):
+
+class ContentBasedNN(nn.Module): ## Single user!
+    def __init__(
+        self,
+        num_artists,
+        num_genres,
+        artist_emb_dim=32,
+        genre_emb_dim=8,
+        hidden_layers_size=(128, 64)
+    ):
         super().__init__()
 
-        self.artist_emb = nn.Embedding(n_artists, d)
-        self.genre_emb  = nn.Embedding(n_genres, d)
+        self.artist_emb = nn.Embedding(num_artists, artist_emb_dim)
+        self.genre_emb = nn.Embedding(num_genres, genre_emb_dim)
 
         self.mlp = nn.Sequential(
-            nn.Linear(d * 2, 128),
+            nn.Linear(
+                artist_emb_dim + genre_emb_dim,
+                hidden_layers_size[0]
+            ),
             nn.ReLU(),
-            nn.Linear(128, 64)
+            nn.Linear(
+                hidden_layers_size[0],
+                hidden_layers_size[1]
+                ),
+            nn.ReLU(),
+            nn.Linear(hidden_layers_size[1], 1),
+            nn.Sigmoid()
         )
 
     def forward(self, artist_id, genre_id):
-        x = torch.cat([
-            self.artist_emb(artist_id),
-            self.genre_emb(genre_id)
-        ], dim=1)
+
+        artist_vec = self.artist_emb(artist_id)
+        genre_vec = self.genre_emb(genre_id)
+
+        x = torch.cat(
+            [artist_vec, genre_vec],
+            dim=1
+        )
+
         return self.mlp(x)
-
-
-class UserEncoder(nn.Module):
-    def __init__(self, n_users, d=64):
-        super().__init__()
-        self.user_emb = nn.Embedding(n_users, d)
-
-    def forward(self, user_id):
-        return self.user_emb(user_id)
-
