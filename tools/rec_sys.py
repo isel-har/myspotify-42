@@ -678,38 +678,34 @@ class Recommender:
         df = duckdb.query(artist_genre_query).to_df()
 
         artist_tensor = torch.tensor(artist_encoder.transform(df['artist'])).long()
-        genre_tensor = torch.tensor(genre_encoder.transform(df['genre'])).long()
+        genre_tensor  = torch.tensor(genre_encoder.transform(df['genre'])).long()
 
         dataloader = DataLoader(
             TensorDataset(artist_tensor, genre_tensor),
             batch_size=16,
-            shuffle=True
+            shuffle=True,
         )
 
+        # ── Model / optimiser ────────────────────────────────────────────────────────
         encoder = SongEncoder(
             num_artists=len(artist_encoder.classes_),
-            num_genres=len(genre_encoder.classes_)
+            num_genres=len(genre_encoder.classes_),
         )
 
         optimizer = torch.optim.Adam(encoder.parameters(), lr=1e-3)
-
         criterion = nn.CrossEntropyLoss()
 
+        # ── Training loop ────────────────────────────────────────────────────────────
         for epoch in range(6):
             encoder.train()
             total_loss = 0
 
             for artists, genres in dataloader:
-
                 optimizer.zero_grad()
 
                 _, artist_logits, genre_logits = encoder(artists, genres)
 
-                loss_artist = criterion(artist_logits, artists)
-                loss_genre  = criterion(genre_logits, genres)
-
-                loss = loss_artist + loss_genre
-
+                loss = criterion(artist_logits, artists) + criterion(genre_logits, genres)
                 loss.backward()
                 optimizer.step()
 
@@ -717,18 +713,23 @@ class Recommender:
 
             print(f"Epoch {epoch+1}: {total_loss/len(dataloader):.4f}")
 
-
+        # ── Inference: collect the latent vectors z, NOT the logits ─────────────────
         encoder.eval()
         song_vectors = []
+
         with torch.no_grad():
             for artists, genres in dataloader:
-                
-                _, artist_logits, genre_logits = encoder(artists, genres)
-                song_vectors.append(torch.concat([artist_logits, genre_logits]).numpy())
+                z, _, _ = encoder(artists, genres)   # ✅ use z, not the logits
+                song_vectors.append(z)               # shape: (batch, emb_dim)
 
-        
-        np.save("songs_embedding.npy", np.array(song_vectors, dtype=np.float32))
-        
+        # Stack all batches into one (N, emb_dim) array
+        all_embeddings = torch.cat(song_vectors, dim=0).numpy()   # ✅ cat along batch dim
+
+        # ── Persist ──────────────────────────────────────────────────────────────────
+        os.makedirs("data", exist_ok=True)                         # ✅ ensure dir exists
+        np.save("data/songs_embedding.npy", all_embeddings.astype(np.float32))
+        torch.save(encoder.state_dict(), "data/encoder.pt")
+
 
 
     def content_based_recommendation(self, user_profile_df, baseline=True):

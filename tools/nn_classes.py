@@ -22,6 +22,7 @@ class NCFRecommender(nn.Module):
         return self.fc(x)
 
 
+
 class SongEncoder(nn.Module):
     def __init__(self, num_artists, num_genres, emb_dim=64):
         super().__init__()
