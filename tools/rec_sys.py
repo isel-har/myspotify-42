@@ -1,8 +1,4 @@
-from cgi import test
-from distutils.command.bdist import show_formats
 import os
-
-from sklearn import base
 
 os.environ['GENSIM_DATA_DIR'] = '/Users/isel-har/goinfre/gensim'
 
@@ -25,12 +21,16 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import OneHotEncoder
 
-from tools.nn_classes import NCFRecommender, ContentBasedNN
+from tools.nn_classes import NCFRecommender, SongEncoder
 from tools.train import train
 from torch.utils.data import DataLoader, TensorDataset, Subset
 from tools.tools import  compute_item_similarity, recommend, precision_at_k
 from tools.tools import train_svd, recommend_svd, compute_scores, precision_at_k_svd
 from sklearn.metrics.pairwise import cosine_similarity
+import faiss
+
+
+pd.set_option('display.max_rows', None)
 
 class Recommender:
 
@@ -604,7 +604,8 @@ class Recommender:
         return self.recommend_top_k_inference(ncf, user_id, test_loader)
 
 
-    def user_profile_df(self, user_id=None, limit=0):
+
+    def user_profile_df(self, user_id=None):
         user_history_query = f"""
         with tracks_db as (
             select tdb.track_id, tdb.artist, sdb.play_count from {self.train_triplets_db} as sdb
@@ -614,10 +615,9 @@ class Recommender:
                     parts[2]::VARCHAR AS song_id,
                     parts[3]::VARCHAR AS artist
                     from ({self.unique_tracks_db})
-                    {f"limit {limit}" if limit > 0 else ''}
             ) as tdb
             on sdb.song_id = tdb.song_id
-            {"where sdb.user_id like '{user_id}'" if user_id else ''}
+            where sdb.user_id like '{user_id}'
             order by sdb.play_count desc
             )
             select tracks_db.*, mdb.genre from tracks_db
@@ -627,47 +627,139 @@ class Recommender:
             on mdb.track_id = tracks_db.track_id
         """
         return duckdb.query(user_history_query).to_df()
-        
-    def items_matrix_split(self, user_profile_df):
-        artist_encoder = OneHotEncoder(sparse_output=False)
-        genre_encoder  = OneHotEncoder(sparse_output=False)
 
-        encoded_artist = artist_encoder.fit_transform(user_profile_df['artist'].to_numpy().reshape(-1, 1))
-        encoded_genre  = genre_encoder.fit_transform(user_profile_df['genre'].to_numpy().reshape(-1, 1))
+
+    # def items_matrix_split(self, user_profile_df):
+    #     artist_encoder = OneHotEncoder(sparse_output=False)
+    #     genre_encoder  = OneHotEncoder(sparse_output=False)
+
+    #     encoded_artist = artist_encoder.fit_transform(user_profile_df['artist'].to_numpy().reshape(-1, 1))
+    #     encoded_genre  = genre_encoder.fit_transform(user_profile_df['genre'].to_numpy().reshape(-1, 1))
     
-        items_matrix = np.concatenate([encoded_artist, encoded_genre], axis=1)
+    #     items_matrix = np.concatenate([encoded_artist, encoded_genre], axis=1)
 
-        df_indices = [i for i in range(len(user_profile_df))]
+    #     df_indices = [i for i in range(len(user_profile_df))]
 
-        items_train, items_test, indices_train, indices_test = train_test_split(
-            items_matrix,
-            df_indices,
-            test_size=0.2,
-            shuffle=True,
-            random_state=42
+    #     items_train, items_test, indices_train, indices_test = train_test_split(
+    #         items_matrix,
+    #         df_indices,
+    #         test_size=0.2,
+    #         shuffle=True,
+    #         random_state=42
+    #     )
+    #     return items_train, items_test, indices_train, indices_test
+
+
+
+    def songs_embedding(self):
+               
+        artists_query  = f"""
+            select distinct artist from (SELECT
+                parts[3]::VARCHAR AS artist
+            FROM ({self.unique_tracks_db}))
+        """
+
+        artists = duckdb.query(artists_query).to_df()['artist'].to_numpy()
+        genres  = self.get_genres()
+    
+        artist_encoder = LabelEncoder().fit(artists)
+        genre_encoder = LabelEncoder().fit(genres)
+
+        del artists, genres
+
+        artist_genre_query = f"""
+            select mtd.track_id, mtd.genre, ut.artist from (select 
+                parts[1]::VARCHAR AS track_id,
+                parts[3]::VARCHAR AS artist
+            from ({self.unique_tracks_db})
+            ) as ut
+            join {self.mds_tagtraum_db} as mtd on  ut.track_id = mtd.track_id
+        """
+        df = duckdb.query(artist_genre_query).to_df()
+
+        artist_tensor = torch.tensor(artist_encoder.transform(df['artist'])).long()
+        genre_tensor = torch.tensor(genre_encoder.transform(df['genre'])).long()
+
+        dataloader = DataLoader(
+            TensorDataset(artist_tensor, genre_tensor),
+            batch_size=16,
+            shuffle=True
         )
-        return items_train, items_test, indices_train, indices_test
+
+        encoder = SongEncoder(
+            num_artists=len(artist_encoder.classes_),
+            num_genres=len(genre_encoder.classes_)
+        )
+
+        optimizer = torch.optim.Adam(encoder.parameters(), lr=1e-3)
+
+        criterion = nn.CrossEntropyLoss()
+
+        for epoch in range(6):
+            encoder.train()
+            total_loss = 0
+
+            for artists, genres in dataloader:
+
+                optimizer.zero_grad()
+
+                _, artist_logits, genre_logits = encoder(artists, genres)
+
+                loss_artist = criterion(artist_logits, artists)
+                loss_genre  = criterion(genre_logits, genres)
+
+                loss = loss_artist + loss_genre
+
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item()
+
+            print(f"Epoch {epoch+1}: {total_loss/len(dataloader):.4f}")
+
+
+        encoder.eval()
+        song_vectors = []
+        with torch.no_grad():
+            for artists, genres in dataloader:
+                
+                _, artist_logits, genre_logits = encoder(artists, genres)
+                song_vectors.append(torch.concat([artist_logits, genre_logits]).numpy())
+
+        
+        np.save("songs_embedding.npy", np.array(song_vectors, dtype=np.float32))
+        
 
 
     def content_based_recommendation(self, user_profile_df, baseline=True):
 
-        top_idx = None
 
-        if baseline:
-            items_train, items_test, indices_train, indices_test = self.items_matrix_split(user_profile_df)
-            play_count_train =  user_profile_df['play_count'].iloc[indices_train].to_numpy()
-            user_taste = np.sum(play_count_train[:, None] * items_train, axis=0) / np.sum(play_count_train)
-            sim = cosine_similarity(user_taste.reshape(1, -1), items_test)
+        song_vectors = np.load("songs_embedding.npy")
+
+        faiss.normalize_L2(song_vectors)
+
+        index = faiss.IndexFlatIP(song_vectors.shape[1])
+        index.add(song_vectors)
+        ## encoder user profile
+        ## then find the top similar items!
+
+        # top_idx = None
+
+        # if baseline:
+        #     items_train, items_test, indices_train, indices_test = self.items_matrix_split(user_profile_df)
+        #     play_count_train =  user_profile_df['play_count'].iloc[indices_train].to_numpy()
+        #     user_taste = np.sum(play_count_train[:, None] * items_train, axis=0) / np.sum(play_count_train)
+        #     sim = cosine_similarity(user_taste.reshape(1, -1), items_test)
             
-            flat = sim.ravel()
+        #     flat = sim.ravel()
 
-            top_idx = np.argpartition(flat, -10)[-10:]
-            top_idx = top_idx[np.argsort(flat[top_idx])[::-1]]
-            return user_profile_df.iloc[top_idx].sort_values(by='play_count', ascending=False)
+        #     top_idx = np.argpartition(flat, -10)[-10:]
+        #     top_idx = top_idx[np.argsort(flat[top_idx])[::-1]]
+        #     return user_profile_df.iloc[top_idx].sort_values(by='play_count', ascending=False)
 
 
-        test_df = self.user_profile_df(limit=100)
-        user_profile_df = user_profile_df.sample(frac=1, random_state=42)
+        # test_df = self.user_profile_df(limit=100)
+        # user_profile_df = user_profile_df.sample(frac=1, random_state=42)
 
         
 

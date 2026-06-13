@@ -2,7 +2,7 @@ import argparse
 from tools.rec_sys import Recommender
 from tools.tools import train_test_split_matrix
 import sys
-import numpy as np
+# import numpy as np
 
 def parse_args():
 
@@ -67,7 +67,6 @@ def main():
 
     # user_item_matrix = recommender.user_item_matrix()
     # train_matrix, test_matrix = train_test_split_matrix(user_item_matrix)
-
     # top_10, p_at_10 = recommender.user_based_recommendation(user_id, train_matrix, test_matrix)
     # print("cosine similarity approach")
     # print("Average p@10:", p_at_10)
@@ -81,21 +80,23 @@ def main():
     # print(top_10)
 
 
-    print("Bonus part")
+    # print("Bonus part")
     # print("Content-based cosine similarity approach")
 
-    user_profile_df = recommender.user_profile_df(user_id)
+    recommender.songs_embedding()
+    # user_profile_df = recommender.user_profile_df(user_id)
+
+    # print(user_profile_df)
     # top_10 = recommender.content_based_recommendation(user_profile_df)
 
 
-    recommender.content_based_recommendation(user_profile_df, False)
+    # recommender.content_based_recommendation(user_profile_df, False)
     # print(top_10)# add p@10
 
 
     # train_loader, test_loader = recommender. dataloader_train_test_split()
     # top_10 = recommender.ncf_recommendation(train_loader, test_loader)
     # print(top_10)
-
 
 
 if __name__ == "__main__":
