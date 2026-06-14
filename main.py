@@ -65,13 +65,14 @@ def main():
     #     print(df)
 
 
-    # user_item_matrix = recommender.user_item_matrix()
-    # train_matrix, test_matrix = train_test_split_matrix(user_item_matrix)
-    # top_10, p_at_10 = recommender.user_based_recommendation(user_id, train_matrix, test_matrix)
-    # print("cosine similarity approach")
-    # print("Average p@10:", p_at_10)
-    # print("top 10 recommendation:")
-    # print(top_10)
+    user_item_matrix = recommender.user_item_matrix()
+    train_matrix, test_matrix = train_test_split_matrix(user_item_matrix)
+    top_10, p_at_10 = recommender.user_based_recommendation(user_id, train_matrix, test_matrix)
+    print("cosine similarity approach")
+    print("Average p@10:", p_at_10)
+    print("top 10 recommendation:")
+    print(top_10)
+    # print(','.join(top_10['song_id'].values.to_list()))
 
     # top_10, p_at_10 = recommender.user_based_recommendation(user_id, train_matrix, test_matrix, False)
     # print("Matrix factorization approach")
@@ -80,23 +81,21 @@ def main():
     # print(top_10)
 
 
+    # top_10 = recommender.ncf_recommendation(user_id, train_loader, test_loader, n_users, n_items)
+    # print(top_10)
     # print("Bonus part")
     # print("Content-based cosine similarity approach")
 
-    recommender.songs_embedding()
+    
     # user_profile_df = recommender.user_profile_df(user_id)
 
-    # print(user_profile_df)
+    # # print(user_profile_df)
+
+    # # recommender.songs_embedding()
     # top_10 = recommender.content_based_recommendation(user_profile_df)
-
-
-    # recommender.content_based_recommendation(user_profile_df, False)
-    # print(top_10)# add p@10
-
-
-    # train_loader, test_loader = recommender. dataloader_train_test_split()
-    # top_10 = recommender.ncf_recommendation(train_loader, test_loader)
     # print(top_10)
+
+    # train_loader, test_loader, n_users, n_items = recommender. dataloader_train_test_split()
 
 
 if __name__ == "__main__":

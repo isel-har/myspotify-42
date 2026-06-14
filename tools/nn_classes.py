@@ -51,42 +51,17 @@ class SongEncoder(nn.Module):
         return z, artist_logits, genre_logits
 
 
-# class SongEncoder(nn.Module):
-#     def __init__(
-#         self,
-#         num_artists,
-#         num_genres,
-#         artist_emb_dim=32,
-#         genre_emb_dim=8,
-#         hidden_layers_size=(128, 64)
-#     ):
+# class UserTasteAttention(nn.Module):
+#     def __init__(self, embed_dim):
 #         super().__init__()
-
-#         self.artist_emb = nn.Embedding(num_artists, artist_emb_dim)
-#         self.genre_emb = nn.Embedding(num_genres, genre_emb_dim)
-
-#         self.mlp = nn.Sequential(
-#             nn.Linear(
-#                 artist_emb_dim + genre_emb_dim,
-#                 hidden_layers_size[0]
-#             ),
-#             nn.ReLU(),
-#             nn.Linear(
-#                 hidden_layers_size[0],
-#                 hidden_layers_size[1]
-#                 ),
-#             nn.ReLU(),
-#             nn.Linear(hidden_layers_size[1], 1),
+#         self.attention = nn.Sequential(
+#             nn.Linear(embed_dim, 64),
+#             nn.Tanh(),
+#             nn.Linear(64, 1)
 #         )
 
-#     def forward(self, artist_id, genre_id):
-
-#         artist_vec = self.artist_emb(artist_id)
-#         genre_vec = self.genre_emb(genre_id)
-
-#         x = torch.cat(
-#             [artist_vec, genre_vec],
-#             dim=1
-#         )
-
-#         return self.mlp(x)
+#     def forward(self, item_embeddings):  # (N, embed_dim)
+#         scores = self.attention(item_embeddings)         # (N, 1)
+#         weights = torch.softmax(scores, dim=0)           # (N, 1)
+#         taste_vec = (weights * item_embeddings).sum(0)   # (embed_dim,)
+#         return taste_vec, weights

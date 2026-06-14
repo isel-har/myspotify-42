@@ -47,6 +47,7 @@ class Recommender:
         self.pred_db = None
         self.w2v_model = None
         self.processed = False
+        self.user_encoder = None
 
         self.themes = {
             'love': ['love', 'heart', 'kiss', 'romance', 'lover', 'baby', 'honey'],
@@ -98,7 +99,8 @@ class Recommender:
         """
 
 
-    def triplets_tracks_db(self, columns):
+    def triplets_tracks_db(self, columns, song_ids=None):
+        exclusions = ", ".join(f"'{song}'" for song in song_ids) if song_ids else ''
         return f"""
             SELECT
             {columns}
@@ -112,6 +114,7 @@ class Recommender:
                          parts[3]::VARCHAR AS artist,
                          parts[4]::VARCHAR AS title
                      FROM ({self.unique_tracks_db})
+                     {'' if not song_ids else f"where song_id in ({exclusions})"}
             )  AS tdb
             ON sdb.song_id=tdb.song_id
         """
@@ -480,6 +483,7 @@ class Recommender:
 
         top_10_rec   = recommend_svd(user_id, test_matrix, train_matrix)
 
+
         return top_10_rec, p_at_10
 
 
@@ -523,10 +527,22 @@ class Recommender:
 
     def user_based_recommendation(self, user_id, train_matrix, test_matrix, baseline=True):
         
-        if baseline:
-            return self.cosine_similarity_approach(user_id, train_matrix, test_matrix)
 
-        return self.matrix_factorization_approach(user_id, train_matrix, test_matrix)
+        top_k, p_at_k = self.cosine_similarity_approach(user_id, train_matrix, test_matrix) if baseline else \
+            self.matrix_factorization_approach(user_id, train_matrix, test_matrix)
+
+
+        top_10_rec = duckdb.query(
+            self.triplets_tracks_db(
+                "artist, title",
+                song_ids=top_k.index.to_list()
+            ))
+        print(top_10_rec)
+    
+        # top_10_rec['likelihood'] = top_k.values.tolist()
+        # top_10_rec.sort_values(by='likelihood')
+
+        return top_k, p_at_k
 
 
 
@@ -537,10 +553,10 @@ class Recommender:
         items  = triplets['song_id'].to_numpy()
         labels = triplets['play_count'].to_numpy()
 
-        user_encoder = LabelEncoder()
+        self.user_encoder = LabelEncoder()
         item_encoder = LabelEncoder()
 
-        users = user_encoder.fit_transform(users)
+        users = self.user_encoder.fit_transform(users)
         items = item_encoder.fit_transform(items)
 
         users  = torch.tensor(users,  dtype=torch.long)
@@ -549,22 +565,31 @@ class Recommender:
         return users, items, labels
 
 
-    def recommend_top_k_inference(model, user_id, dataset, k=10, device="cpu"):
+    def recommend_top_k_inference(
+        self,
+        model,
+        user_id,
+        dataset,
+        k=10,
+        device="cpu"
+    ):
         model.eval()
-
+        
+        user_encoded = self.user_encoder.transform()
         user_tensor = torch.tensor([user_id] * len(dataset)).to(device)
-        item_tensor = torch.tensor(dataset).to(device)
+        return user_tensor
+        # item_tensor = torch.tensor(dataset).to(device)
 
-        with torch.no_grad():
-            scores = model(user_tensor, item_tensor)
+        # with torch.no_grad():
+        #     scores = model(user_tensor, item_tensor)
+        #     scores = torch.sigmoid(scores)
 
-            # If using BCEWithLogitsLoss → apply sigmoid
-            scores = torch.sigmoid(scores)
-
-        scores = scores.cpu().numpy().flatten()
-        # Get top-k indices
-        top_k_idx = scores.argsort()[-k:][::-1]
-        return [(dataset[i], scores[i]) for i in top_k_idx]
+        # # print(scores)
+        # return scores
+        # scores = scores.cpu().numpy().flatten()
+    
+        # top_k_idx = scores.argsort()[-k:][::-1]
+        # return [(dataset[i], scores[i]) for i in top_k_idx]
     
 
     def dataloader_train_test_split(self, users_limit=50, songs_limit=50):
@@ -587,22 +612,22 @@ class Recommender:
             batch_size=32
         )
 
-        return train_loader, test_loader
-
-
-
-    # def train(self, model)
-
-
-    def ncf_recommendation(self, user_id, train_loader, test_loader):
+        return train_loader, test_loader, len(users), len(items)
 
         
-        ncf = NCFRecommender(num_users=num_users, num_items=num_items, embedding_dim=8)
 
-        ncf = self.train(ncf, train_loader)
 
-        return self.recommend_top_k_inference(ncf, user_id, test_loader)
+    def ncf_recommendation(self, user_id, train_loader, test_loader, n_users, n_items):
 
+        ncf = NCFRecommender(num_users=n_users, num_items=n_items, embedding_dim=8)
+
+        ncf = train(model=ncf, train_loader=train_loader)
+    
+        return self.recommend_top_k_inference(
+            model=ncf,
+            user_id=user_id,
+            dataset=test_loader
+        )
 
 
     def user_profile_df(self, user_id=None):
@@ -617,7 +642,7 @@ class Recommender:
                     from ({self.unique_tracks_db})
             ) as tdb
             on sdb.song_id = tdb.song_id
-            where sdb.user_id like '{user_id}'
+            where sdb.user_id like '{user_id}' and sdb.play_count >= 10
             order by sdb.play_count desc
             )
             select tracks_db.*, mdb.genre from tracks_db
@@ -627,27 +652,6 @@ class Recommender:
             on mdb.track_id = tracks_db.track_id
         """
         return duckdb.query(user_history_query).to_df()
-
-
-    # def items_matrix_split(self, user_profile_df):
-    #     artist_encoder = OneHotEncoder(sparse_output=False)
-    #     genre_encoder  = OneHotEncoder(sparse_output=False)
-
-    #     encoded_artist = artist_encoder.fit_transform(user_profile_df['artist'].to_numpy().reshape(-1, 1))
-    #     encoded_genre  = genre_encoder.fit_transform(user_profile_df['genre'].to_numpy().reshape(-1, 1))
-    
-    #     items_matrix = np.concatenate([encoded_artist, encoded_genre], axis=1)
-
-    #     df_indices = [i for i in range(len(user_profile_df))]
-
-    #     items_train, items_test, indices_train, indices_test = train_test_split(
-    #         items_matrix,
-    #         df_indices,
-    #         test_size=0.2,
-    #         shuffle=True,
-    #         random_state=42
-    #     )
-    #     return items_train, items_test, indices_train, indices_test
 
 
 
@@ -661,9 +665,12 @@ class Recommender:
 
         artists = duckdb.query(artists_query).to_df()['artist'].to_numpy()
         genres  = self.get_genres()
-    
+        
         artist_encoder = LabelEncoder().fit(artists)
         genre_encoder = LabelEncoder().fit(genres)
+
+        joblib.dump(artist_encoder, "data/artist_encoder.pkl")
+        joblib.dump(genre_encoder, "data/genre_encoder.pkl")
 
         del artists, genres
 
@@ -676,6 +683,7 @@ class Recommender:
             join {self.mds_tagtraum_db} as mtd on  ut.track_id = mtd.track_id
         """
         df = duckdb.query(artist_genre_query).to_df()
+        df.to_csv('data/artist_genre.csv', index=False)
 
         artist_tensor = torch.tensor(artist_encoder.transform(df['artist'])).long()
         genre_tensor  = torch.tensor(genre_encoder.transform(df['genre'])).long()
@@ -686,7 +694,6 @@ class Recommender:
             shuffle=True,
         )
 
-        # ── Model / optimiser ────────────────────────────────────────────────────────
         encoder = SongEncoder(
             num_artists=len(artist_encoder.classes_),
             num_genres=len(genre_encoder.classes_),
@@ -695,7 +702,6 @@ class Recommender:
         optimizer = torch.optim.Adam(encoder.parameters(), lr=1e-3)
         criterion = nn.CrossEntropyLoss()
 
-        # ── Training loop ────────────────────────────────────────────────────────────
         for epoch in range(6):
             encoder.train()
             total_loss = 0
@@ -713,134 +719,78 @@ class Recommender:
 
             print(f"Epoch {epoch+1}: {total_loss/len(dataloader):.4f}")
 
-        # ── Inference: collect the latent vectors z, NOT the logits ─────────────────
+
         encoder.eval()
         song_vectors = []
 
         with torch.no_grad():
             for artists, genres in dataloader:
-                z, _, _ = encoder(artists, genres)   # ✅ use z, not the logits
-                song_vectors.append(z)               # shape: (batch, emb_dim)
+                z, _, _ = encoder(artists, genres)
+                song_vectors.append(z)
 
-        # Stack all batches into one (N, emb_dim) array
-        all_embeddings = torch.cat(song_vectors, dim=0).numpy()   # ✅ cat along batch dim
+
+        all_embeddings = torch.cat(song_vectors, dim=0).numpy()
 
         # ── Persist ──────────────────────────────────────────────────────────────────
-        os.makedirs("data", exist_ok=True)                         # ✅ ensure dir exists
+        os.makedirs("data", exist_ok=True) 
         np.save("data/songs_embedding.npy", all_embeddings.astype(np.float32))
         torch.save(encoder.state_dict(), "data/encoder.pt")
 
 
 
-    def content_based_recommendation(self, user_profile_df, baseline=True):
+    def content_based_recommendation(self, user_profile_df, k=10):
 
+        song_vectors = np.load("data/songs_embedding.npy", allow_pickle=False).astype('float32')
+        artist_encoder = joblib.load("data/artist_encoder.pkl")
+        genre_encoder = joblib.load("data/genre_encoder.pkl")
+        weights = torch.load("data/encoder.pt", weights_only=False)
 
-        song_vectors = np.load("songs_embedding.npy")
+        encoder = SongEncoder(
+            len(artist_encoder.classes_),
+            len(genre_encoder.classes_)
+        )
+        encoder.load_state_dict(weights)
+        encoder.eval()
 
         faiss.normalize_L2(song_vectors)
 
         index = faiss.IndexFlatIP(song_vectors.shape[1])
         index.add(song_vectors)
-        ## encoder user profile
-        ## then find the top similar items!
 
-        # top_idx = None
+        del song_vectors
 
-        # if baseline:
-        #     items_train, items_test, indices_train, indices_test = self.items_matrix_split(user_profile_df)
-        #     play_count_train =  user_profile_df['play_count'].iloc[indices_train].to_numpy()
-        #     user_taste = np.sum(play_count_train[:, None] * items_train, axis=0) / np.sum(play_count_train)
-        #     sim = cosine_similarity(user_taste.reshape(1, -1), items_test)
-            
-        #     flat = sim.ravel()
+        artist_tensor = torch.tensor(
+            artist_encoder.transform(user_profile_df['artist'].values)
+        ).long()
+        genre_tensor = torch.tensor(
+            genre_encoder.transform(user_profile_df['genre'].values)
+        ).long()
 
-        #     top_idx = np.argpartition(flat, -10)[-10:]
-        #     top_idx = top_idx[np.argsort(flat[top_idx])[::-1]]
-        #     return user_profile_df.iloc[top_idx].sort_values(by='play_count', ascending=False)
+        loader = DataLoader(
+            TensorDataset(artist_tensor, genre_tensor),
+            batch_size=16,
+            shuffle=False
+        )
+
+        profile_vec = []
+        with torch.no_grad():
+            for artists, genres in loader:
+                z, _, _ = encoder(artists, genres)
+                profile_vec.append(z)
 
 
-        # test_df = self.user_profile_df(limit=100)
-        # user_profile_df = user_profile_df.sample(frac=1, random_state=42)
+        profile_embeddings = torch.cat(profile_vec, dim=0).numpy().astype('float32')
 
-        
+        user_taste_vec = profile_embeddings.mean(axis=0).reshape(1, -1)
 
+        faiss.normalize_L2(user_taste_vec)
 
-        # n_artists = len(user_profile_df['artist'].unique())
-        # n_genres  = len(user_profile_df['genre'].unique())
+        _, indices = index.search(user_taste_vec, k)
 
-        # labels  = torch.tensor(
-        #     np.where(user_profile_df['play_count'] >= 15, 1, 0).astype(np.float32)
-        # ).unsqueeze(1)                                          # shape: (N, 1)
+        df = pd.read_csv("data/artist_genre.csv")
 
-        # artists = torch.from_numpy(
-        #     LabelEncoder().fit_transform(user_profile_df['artist'])
-        # ).long()
+        return df.iloc[indices[0].tolist()]
+    
 
-        # genres  = torch.from_numpy(
-        #     LabelEncoder().fit_transform(user_profile_df['genre'])
-        # ).long()
-
-        # dataset = TensorDataset(artists, genres, labels)
-
-        # train_idx, test_idx = train_test_split(
-        #     np.arange(len(dataset)),
-        #     test_size=0.2,
-        #     stratify=labels.squeeze().numpy(),                  # ← fix: squeeze + numpy
-        #     random_state=42
-        # )
-
-        # train_dataset = Subset(dataset, train_idx)
-        # test_dataset  = Subset(dataset, test_idx)
-
-        # train_loader = DataLoader(
-        #     train_dataset,
-        #     batch_size=16,
-        #     shuffle=True                                        # ← fix: shuffle train
-        # )
-
-        # cbn       = ContentBasedNN(num_artists=n_artists, num_genres=n_genres)
-        # optimizer = torch.optim.Adam(cbn.parameters(), lr=0.001)
-        # criterion = nn.BCELoss()
-
-        # for epoch in range(30):
-        #     cbn.train()
-        #     total_loss = 0
-
-        #     for artists, genres, labels in train_loader:
-        #         optimizer.zero_grad()
-        #         predictions = cbn(artists, genres)
-        #         loss        = criterion(predictions, labels)
-        #         loss.backward()
-        #         optimizer.step()
-        #         total_loss += loss.item()
-
-        #     print(f"Epoch {epoch+1}, Loss: {total_loss / len(train_loader):.4f}")
-
-        # test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
-
-        # cbn.eval()
-        # correct = 0
-        # total   = 0
-
-        # with torch.no_grad():
-        #     for artists, genres, labels in test_loader:
-
-        #         outputs = cbn(artists, genres)
-        #         preds   = torch.round(outputs).squeeze()
-        #         labels  = labels.squeeze()
-        #         correct += (preds == labels).sum().item()
-        #         # print((preds == 1))
-        #         # print(labels)
-        #         # print(preds)
-        #         # indices = test_idx[passed_batch:len(labels) + passed_batch]
-
-        # #         np.ar(preds == 1).numpy()      # ← fix: round for binary
-        #         # labels  = labels.squeeze()                      # ← fix: squeeze labels
-
-        #         total   += labels.size(0)
-        #         # passed_batch += len(labels)
-
-        # accuracy = correct / total
-        # print(f"Accuracy: {accuracy:.4f}")
-        
+    
        
